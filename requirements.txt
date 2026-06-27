@@ -1,4 +1,3 @@
-python-telegram-bot[job-queue]
+python-telegram-bot
 playwright
-playwright-python
 psycopg2-binary
