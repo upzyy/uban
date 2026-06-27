@@ -44,8 +44,15 @@ def is_owner(update: Update):
 
 
 def clean_username(text):
-    text = text.replace("@", "").strip()
-    return re.sub(r"[^a-zA-Z0-9._]", "", text)
+    text = text.strip()
+    text = text.replace("https://www.instagram.com/", "")
+    text = text.replace("http://www.instagram.com/", "")
+    text = text.replace("https://instagram.com/", "")
+    text = text.replace("http://instagram.com/", "")
+    text = text.replace("@", "")
+    text = text.split("?")[0]
+    text = text.split("/")[0]
+    return re.sub(r"[^A-Za-z0-9._]", "", text)
 
 
 def account_url(username):
@@ -70,21 +77,48 @@ def account_buttons(username):
 
 
 def check_instagram(username):
+    url = account_url(username)
+
     try:
         r = requests.get(
-            account_url(username),
+            url,
             timeout=15,
-            headers={"User-Agent": "Mozilla/5.0"}
+            allow_redirects=True,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 Chrome/120 Safari/537.36"
+                ),
+                "Accept-Language": "en-US,en;q=0.9",
+            }
         )
 
-        if r.status_code == 200:
-            return "active"
-        if r.status_code == 404:
+        page = r.text.lower()
+        username_lower = username.lower()
+
+        if (
+            "profile isn't available" in page
+            or "profile isn’t available" in page
+            or "the link may be broken" in page
+            or "profile may have been removed" in page
+            or r.status_code == 404
+        ):
             return "banned_or_not_found"
+
+        active_signals = [
+            f'"username":"{username_lower}"',
+            f'"alternateName":"@{username_lower}"'.lower(),
+            f"https://www.instagram.com/{username_lower}/",
+            "profilepage_",
+        ]
+
+        if r.status_code == 200 and any(signal in page for signal in active_signals):
+            return "active"
+
         if r.status_code == 429:
             return "rate_limited"
 
-        return f"unknown_{r.status_code}"
+        return "banned_or_not_found"
 
     except Exception:
         return "error"
@@ -97,6 +131,8 @@ def status_icon(status):
         return "🚫 Banned / Not Found"
     if status == "rate_limited":
         return "⏳ Rate Limited"
+    if status == "error":
+        return "⚠️ Error Checking"
     return f"⚠️ {status}"
 
 
@@ -106,7 +142,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "🛡️ **Unban Watcher Bot**\n\n"
-        "I can monitor Instagram usernames and alert you when one becomes active again.\n\n"
+        "I monitor Instagram usernames and alert you when one becomes active again.\n\n"
         "Choose an option:",
         reply_markup=main_menu(),
         parse_mode="Markdown"
@@ -133,8 +169,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "add":
         context.user_data[WAITING_FOR_ADD] = True
         await query.edit_message_text(
-            "➕ **Add Account**\n\nSend me the Instagram username.\n\n"
-            "Example:\n`seedra_gharaibeh`\n\n"
+            "➕ **Add Account**\n\n"
+            "Send me the Instagram username.\n\n"
+            "Example:\n"
+            "`seedra_gharaibeh`\n\n"
             "You can also send multiple usernames separated by commas.",
             parse_mode="Markdown"
         )
@@ -204,10 +242,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data[WAITING_FOR_ADD] = False
 
     msg = "✅ **Saved Accounts**\n\n"
+
     for username, status, url in added:
         msg += f"👤 @{username}\n"
         msg += f"Status: {status_icon(status)}\n"
-        msg += f"Link: {url}\n\n"
+        msg += f"🔗 {url}\n\n"
 
     await update.message.reply_text(
         msg,
@@ -234,6 +273,7 @@ async def show_list(query, chat_id):
         return
 
     msg = "📋 **Your Watchlist**\n\n"
+
     for username, status, url in rows:
         msg += f"👤 @{username}\n"
         msg += f"{status_icon(status)}\n"
@@ -264,8 +304,14 @@ async def show_remove_menu(query, chat_id):
         return
 
     keyboard = []
+
     for (username,) in rows:
-        keyboard.append([InlineKeyboardButton(f"🗑 @{username}", callback_data=f"remove:{username}")])
+        keyboard.append([
+            InlineKeyboardButton(
+                f"🗑 @{username}",
+                callback_data=f"remove:{username}"
+            )
+        ])
 
     keyboard.append([InlineKeyboardButton("⬅️ Menu", callback_data="menu")])
 
