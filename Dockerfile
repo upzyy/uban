@@ -1,11 +1,9 @@
-FROM mcr.microsoft.com/playwright/python:v1.49.1-jammy
+FROM mcr.microsoft.com/playwright/python:v1.52.0-noble
 
 WORKDIR /app
-
-COPY requirements.txt .
+COPY . /app
 
 RUN pip install --no-cache-dir -r requirements.txt
-
-COPY . .
+RUN playwright install chromium
 
 CMD ["python", "main.py"]
