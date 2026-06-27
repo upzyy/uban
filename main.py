@@ -1,7 +1,8 @@
 import os
 import re
-import requests
+import html
 import psycopg2
+from playwright.async_api import async_playwright
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -52,10 +53,13 @@ def clean_username(text):
     text = text.replace("@", "")
     text = text.split("?")[0]
     text = text.split("/")[0]
+
+    # Instagram allows letters, numbers, underscores, and full stops.
     return re.sub(r"[^A-Za-z0-9._]", "", text)
 
 
 def account_url(username):
+    username = clean_username(username)
     return f"https://www.instagram.com/{username}/"
 
 
@@ -76,61 +80,93 @@ def account_buttons(username):
     ])
 
 
-def check_instagram(username):
+async def check_instagram(username):
+    username = clean_username(username)
     url = account_url(username)
 
     try:
-        r = requests.get(
-            url,
-            timeout=15,
-            allow_redirects=True,
-            headers={
-                "User-Agent": (
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            )
+
+            page = await browser.new_page(
+                user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 Chrome/120 Safari/537.36"
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
                 ),
-                "Accept-Language": "en-US,en;q=0.9",
-            }
-        )
+                viewport={"width": 1366, "height": 768},
+            )
 
-        page = r.text.lower()
-        username_lower = username.lower()
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(5000)
 
-        if (
-            "profile isn't available" in page
-            or "profile isn’t available" in page
-            or "the link may be broken" in page
-            or "profile may have been removed" in page
-            or r.status_code == 404
-        ):
-            return "banned_or_not_found"
+            final_url = page.url.lower()
+            title = (await page.title()).lower()
+            body_text = (await page.locator("body").inner_text()).lower()
+            html_content = (await page.content()).lower()
 
-        active_signals = [
-            f'"username":"{username_lower}"',
-            f'"alternateName":"@{username_lower}"'.lower(),
-            f"https://www.instagram.com/{username_lower}/",
-            "profilepage_",
+            await browser.close()
+
+        unavailable_signals = [
+            "profile isn't available",
+            "profile isn’t available",
+            "the link may be broken",
+            "profile may have been removed",
+            "sorry, this page isn't available",
+            "sorry, this page isn’t available",
+            "page not found",
         ]
 
-        if r.status_code == 200 and any(signal in page for signal in active_signals):
+        if any(signal in body_text for signal in unavailable_signals):
+            return "banned_or_not_found"
+
+        if response and response.status == 404:
+            return "banned_or_not_found"
+
+        if "accounts/login" in final_url:
+            # Instagram sometimes redirects public profiles to login.
+            # This does NOT mean banned.
+            return "active_or_login_required"
+
+        username_lower = username.lower()
+
+        active_signals = [
+            f"@{username_lower}",
+            f'"username":"{username_lower}"',
+            f"instagram.com/{username_lower}",
+            username_lower,
+            "followers",
+            "following",
+            "posts",
+        ]
+
+        if any(signal in body_text for signal in active_signals) or any(signal in html_content for signal in active_signals):
             return "active"
 
-        if r.status_code == 429:
-            return "rate_limited"
+        if "instagram" in title and response and response.status in [200, 301, 302]:
+            return "active_or_login_required"
 
         return "banned_or_not_found"
 
-    except Exception:
+    except Exception as e:
+        print("CHECK ERROR:", e)
         return "error"
 
 
 def status_icon(status):
     if status == "active":
         return "✅ Active / Unbanned"
+    if status == "active_or_login_required":
+        return "✅ Active / Login Required"
     if status == "banned_or_not_found":
         return "🚫 Banned / Not Found"
-    if status == "rate_limited":
-        return "⏳ Rate Limited"
     if status == "error":
         return "⚠️ Error Checking"
     return f"⚠️ {status}"
@@ -141,11 +177,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "🛡️ **Unban Watcher Bot**\n\n"
+        "🛡️ <b>Unban Watcher Bot</b>\n\n"
         "I monitor Instagram usernames and alert you when one becomes active again.\n\n"
         "Choose an option:",
         reply_markup=main_menu(),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 
@@ -161,20 +197,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "menu":
         await query.edit_message_text(
-            "🛡️ **Unban Watcher Bot**\n\nChoose an option:",
+            "🛡️ <b>Unban Watcher Bot</b>\n\nChoose an option:",
             reply_markup=main_menu(),
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
 
     elif data == "add":
         context.user_data[WAITING_FOR_ADD] = True
         await query.edit_message_text(
-            "➕ **Add Account**\n\n"
+            "➕ <b>Add Account</b>\n\n"
             "Send me the Instagram username.\n\n"
             "Example:\n"
-            "`seedra_gharaibeh`\n\n"
+            "<code>seedra_gharaibeh</code>\n\n"
             "You can also send multiple usernames separated by commas.",
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
 
     elif data == "list":
@@ -198,8 +234,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
         await query.edit_message_text(
-            f"🗑 Removed @{username}.",
-            reply_markup=main_menu()
+            f"🗑 Removed @{html.escape(username)}.",
+            reply_markup=main_menu(),
+            parse_mode="HTML"
         )
 
 
@@ -228,7 +265,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with conn.cursor() as cur:
             for username in usernames:
                 url = account_url(username)
-                status = check_instagram(username)
+                status = await check_instagram(username)
 
                 cur.execute("""
                 INSERT INTO tracked(chat_id, username, last_status, profile_url)
@@ -241,17 +278,19 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data[WAITING_FOR_ADD] = False
 
-    msg = "✅ **Saved Accounts**\n\n"
+    msg = "✅ <b>Saved Accounts</b>\n\n"
 
     for username, status, url in added:
-        msg += f"👤 @{username}\n"
+        safe_username = html.escape(username)
+        safe_url = html.escape(url)
+        msg += f"👤 <b>@{safe_username}</b>\n"
         msg += f"Status: {status_icon(status)}\n"
-        msg += f"🔗 {url}\n\n"
+        msg += f"🔗 <a href=\"{safe_url}\">{safe_url}</a>\n\n"
 
     await update.message.reply_text(
         msg,
         reply_markup=main_menu(),
-        parse_mode="Markdown",
+        parse_mode="HTML",
         disable_web_page_preview=False
     )
 
@@ -272,17 +311,23 @@ async def show_list(query, chat_id):
         )
         return
 
-    msg = "📋 **Your Watchlist**\n\n"
+    msg = "📋 <b>Your Watchlist</b>\n\n"
 
     for username, status, url in rows:
-        msg += f"👤 @{username}\n"
+        username = clean_username(username)
+        url = account_url(username)
+
+        safe_username = html.escape(username)
+        safe_url = html.escape(url)
+
+        msg += f"👤 <b>@{safe_username}</b>\n"
         msg += f"{status_icon(status)}\n"
-        msg += f"🔗 {url}\n\n"
+        msg += f"🔗 <a href=\"{safe_url}\">{safe_url}</a>\n\n"
 
     await query.edit_message_text(
         msg,
         reply_markup=main_menu(),
-        parse_mode="Markdown",
+        parse_mode="HTML",
         disable_web_page_preview=False
     )
 
@@ -306,6 +351,7 @@ async def show_remove_menu(query, chat_id):
     keyboard = []
 
     for (username,) in rows:
+        username = clean_username(username)
         keyboard.append([
             InlineKeyboardButton(
                 f"🗑 @{username}",
@@ -337,25 +383,29 @@ async def check_all_now(query, chat_id):
                 )
                 return
 
-            msg = "🔄 **Current Account Status**\n\n"
+            msg = "🔄 <b>Current Account Status</b>\n\n"
 
             for username, old_status in rows:
-                new_status = check_instagram(username)
+                username = clean_username(username)
+                new_status = await check_instagram(username)
                 url = account_url(username)
 
                 cur.execute(
-                    "UPDATE tracked SET last_status=%s, profile_url=%s WHERE chat_id=%s AND username=%s",
-                    (new_status, url, chat_id, username)
+                    "UPDATE tracked SET username=%s, last_status=%s, profile_url=%s WHERE chat_id=%s AND username=%s",
+                    (username, new_status, url, chat_id, username)
                 )
 
-                msg += f"👤 @{username}\n"
+                safe_username = html.escape(username)
+                safe_url = html.escape(url)
+
+                msg += f"👤 <b>@{safe_username}</b>\n"
                 msg += f"{status_icon(new_status)}\n"
-                msg += f"🔗 {url}\n\n"
+                msg += f"🔗 <a href=\"{safe_url}\">{safe_url}</a>\n\n"
 
     await query.edit_message_text(
         msg,
         reply_markup=main_menu(),
-        parse_mode="Markdown",
+        parse_mode="HTML",
         disable_web_page_preview=False
     )
 
@@ -367,20 +417,27 @@ async def monitor(context: ContextTypes.DEFAULT_TYPE):
             rows = cur.fetchall()
 
             for chat_id, username, old_status in rows:
-                new_status = check_instagram(username)
+                username = clean_username(username)
+                new_status = await check_instagram(username)
                 url = account_url(username)
 
-                if old_status != "active" and new_status == "active":
+                was_banned = old_status in ["banned_or_not_found", "unknown", "error"]
+                now_active = new_status in ["active", "active_or_login_required"]
+
+                if was_banned and now_active:
+                    safe_username = html.escape(username)
+                    safe_url = html.escape(url)
+
                     await context.bot.send_message(
                         chat_id=chat_id,
                         text=(
-                            "✅ **Account Unbanned / Active Again**\n\n"
-                            f"👤 Username: @{username}\n"
-                            f"🔗 Link: {url}\n\n"
-                            "The account is reachable again."
+                            "✅ <b>Account Unbanned / Active Again</b>\n\n"
+                            f"👤 Username: <b>@{safe_username}</b>\n"
+                            f"🔗 <a href=\"{safe_url}\">{safe_url}</a>\n\n"
+                            "The profile page is reachable again."
                         ),
                         reply_markup=account_buttons(username),
-                        parse_mode="Markdown",
+                        parse_mode="HTML",
                         disable_web_page_preview=False
                     )
 
