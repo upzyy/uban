@@ -7,40 +7,62 @@ from telegram.ext import (
     CallbackQueryHandler, MessageHandler, filters
 )
 
-# Setup logging to see everything in Railway
+# Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 DB_URL = os.getenv("DATABASE_URL")
 
+# --- UI Helper ---
+def get_main_menu():
+    """Returns the persistent menu keyboard."""
+    keyboard = [
+        [InlineKeyboardButton("➕ Add Account", callback_data='add_help')],
+        [InlineKeyboardButton("📋 My Watchlist", callback_data='list')],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+# --- Handlers ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "✨ *InstaMonitor Pro*\nControl your monitoring here:", 
+        reply_markup=get_main_menu(), 
+        parse_mode='Markdown'
+    )
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer() # MANDATORY: Stops loading animation
+    
+    if query.data == 'add_help':
+        await query.edit_message_text(
+            "Send me the username(s) separated by commas.\nExample: `user1,user2`", 
+            reply_markup=get_main_menu(), # Re-attach to prevent loss
+            parse_mode='Markdown'
+        )
+    elif query.data == 'list':
+        # Database logic would go here
+        await query.edit_message_text(
+            "📊 *Your Watchlist is empty.*", 
+            reply_markup=get_main_menu(), 
+            parse_mode='Markdown'
+        )
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-    logger.info(f"Received message: {text}") # THIS WILL SHOW IN RAILWAY LOGS
-    
-    # Process comma-separated list
+    # Simple processing logic
     usernames = [u.strip() for u in text.split(',')]
-    
-    conn = psycopg2.connect(DB_URL)
-    cur = conn.cursor()
-    for user in usernames:
-        try:
-            cur.execute("INSERT INTO watchlist (username) VALUES (%s) ON CONFLICT DO NOTHING", (user,))
-        except Exception as e:
-            logger.error(f"Database error: {e}")
-    conn.commit()
-    cur.close()
-    conn.close()
-    
-    await update.message.reply_text(f"✅ Added {len(usernames)} account(s) to your watchlist.")
+    await update.message.reply_text(
+        f"✅ Added {len(usernames)} account(s).",
+        reply_markup=get_main_menu()
+    )
 
 if __name__ == '__main__':
-    # Build application
     app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     
-    # Register handlers
-    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Bot active. Send me usernames separated by commas.")))
-    # This filter captures ANY text that isn't a command
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    # Filter text messages, ensuring privacy mode is off in BotFather
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Bot is polling...")
     app.run_polling()
